@@ -1,0 +1,223 @@
+	# Gateway Tag Change Script (Value Changed on timer tag)
+# Writes STATE_TAG once at end
+import system
+gatewayName = system.tag.readBlocking("[System]Gateway/SystemName")[0].value
+
+if gatewayName != "sap-ignition":
+
+	# ---- tags ----
+	STATE_TAG = "FTP/sState"
+	REQ_RUN   = "FTP/bRequest_update_start"      # master "start" button
+	REQ_SW    = "FTP/bRequest_sw_download"       # toggle: include SW sequence
+	REQ_IP    = "FTP/bRequest_IP_cnfg_download"  # toggle: include IP+OPC sequence
+	REQ_XML   = "FTP/bRequest_xml_download"      # toggle: include XML sequence
+	LOG_MSG   = "FTP/LogMsg"
+	CLEAR_CNT = "FTP/iClearLogCounter"
+
+	HB_TAG     = "Stand/ConnectionEstablished_SchneiderStand"
+	ACTIVE_TAG = "FTP/iActive_compressor"        # 0=A, 1=B
+	POWER_A    = "Stand/Compressor_A/Cmd/bPowerUpCtrlForUpdate"
+	POWER_B    = "Stand/Compressor_B/Cmd/bPowerUpCtrlForUpdate"
+
+	SEL_SW_TAG = "FTP/sSelected_sw"
+
+	# Serial-number tags (for XML SN verify)
+	SN_A_TAG = "Stand/Compressor_A/SerialNo"
+	SN_B_TAG = "Stand/Compressor_B/SerialNo"
+
+	# -------- run every tick --------
+	# Read active compressor and decide paths
+	active_val = system.tag.readBlocking([ACTIVE_TAG])
+	active = int(active_val[0].value or 0)
+
+	comp = "B" if active == 1 else "A"
+
+	# NEW_IP_TAG (per compressor)
+	if comp == "B":
+		NEW_IP_TAG = "ParameterLoader/Compressor_B/Loaded/sSelected_IPConfig"
+		SEL_SW_TAG = "ParameterLoader/Compressor_B/Loaded/sSelected_sw"
+	else:
+		NEW_IP_TAG = "ParameterLoader/Compressor_A/Loaded/sSelected_IPConfig"
+		SEL_SW_TAG = "ParameterLoader/Compressor_A/Loaded/sSelected_sw"
+
+	# Decide Internal vs External for CURRENT IP based on UseExtCtrl
+	use_ext_tag = "Stand/Compressor_{}/Parameters/UseExtCtrl".format(comp)
+	use_ext = bool(system.tag.readBlocking([use_ext_tag])[0].value)
+	suffix = "External" if use_ext else "Internal"
+	DEV_IP_TAG = "ParameterLoader/Compressor_{}/Loaded/sCurrentControllerIP_{}".format(comp, suffix)
+
+	# Read main inputs (no need to read ACTIVE_TAG again)
+	vals = system.tag.readBlocking([
+		STATE_TAG, HB_TAG, SEL_SW_TAG,
+		REQ_RUN, REQ_SW, REQ_IP, NEW_IP_TAG, DEV_IP_TAG,
+		REQ_XML, CLEAR_CNT
+	])
+
+	state    = (vals[0].value) or "IDLE"
+	hb       = bool(vals[1].value)
+	selected = vals[2].value
+	req_run  = bool(vals[3].value)
+	req_sw   = bool(vals[4].value)
+	req_ip   = bool(vals[5].value)
+	new_ip   = str(vals[6].value or "").strip()
+	dev_ip   = str(vals[7].value or "").strip()
+	req_xml  = bool(vals[8].value)
+	clearCnt = int(vals[9].value or 0)
+
+	# Decide which power tag to use
+	PWR = POWER_B if active == 1 else POWER_A
+
+	# ---- UA tag paths now depend on A/B ----
+	ua_base      = "ParameterLoader/Compressor_{}/UA_Tags/TM251".format(comp)
+	UA_RESET_TAG = ua_base + "/ParameterGroup_C_C_01_0001_Reset"
+	UA_APPLY_TAG = ua_base + "/ParameterGroup_C_C_01_0004_Apply"
+	UA_SN_TAG    = ua_base + "/ParameterGroup_P_P_00_0000_Compressor_SerialNumber"
+	# ----------------------------------------
+
+	# --- clear log / XML countdown ---
+	if clearCnt > 0:
+		clearCnt -= 1
+		if clearCnt == 0:
+			# Log auto-clear when counter hits 0
+			system.tag.writeBlocking([LOG_MSG], [""])
+		system.tag.writeBlocking([CLEAR_CNT], [clearCnt])
+
+	# ---------- state logic ----------
+	if state == "IDLE":
+		if req_run:
+			if not (req_sw or req_ip or req_xml):
+				system.tag.writeBlocking([LOG_MSG], ["ERROR: No actions selected (SW/IP/XML)."])
+				system.tag.writeBlocking([REQ_RUN], [False])  # only clear RUN
+				state = "IDLE"
+			else:
+				system.tag.writeBlocking([PWR], [True])
+				system.tag.writeBlocking([LOG_MSG], ["Waiting for PLC connection..."])
+				state = "WAIT_HB_ON"
+
+	elif state == "WAIT_HB_ON":
+		if hb:
+			if req_sw:
+				msg = FILESYSTEMS.SAP_FTP.Stand.Read_PLC_Dir.run()
+				res = str(msg or "").upper()
+				if res.startswith("ERROR"):
+					state = "ERROR"
+				elif res.startswith("DONE"):
+					state = "READ_DIR"
+			else:
+				state = "AFTER_SW"
+
+	elif state == "READ_DIR":
+		msg = FILESYSTEMS.SAP_FTP.Stand.Clean_PLC.run()
+		res = str(msg or "").upper()
+		if res.startswith("ERROR"):
+			state = "ERROR"
+		elif res.startswith("DONE"):
+			state = "CLEAN_PLC"
+
+	elif state == "CLEAN_PLC":
+		msg = FILESYSTEMS.SAP_FTP.Stand.SW_to_PLC.run(selected)
+		res = str(msg or "").upper()
+		if res.startswith("ERROR"):
+			state = "ERROR"
+		elif res.startswith("DONE"):
+			state = "AFTER_SW"
+
+	elif state == "AFTER_SW":
+		if req_ip:
+			msg = FILESYSTEMS.SAP_FTP.Stand.Config_generator.createAndUploadCfg_from_tags()
+			res = str(msg or "").upper()
+			if res.startswith("ERROR"):
+				state = "ERROR"
+			elif res.startswith("DONE"):
+				state = "UPLOAD_CFG"
+		else:
+			state = "AFTER_CFG"
+
+	elif state == "UPLOAD_CFG":
+		msg = FILESYSTEMS.SAP_FTP.Stand.Create_device.add_tm251_connection_from_tags()
+		res = str(msg or "").upper()
+		if res.startswith("ERROR"):
+			state = "ERROR"
+		elif res.startswith("DONE"):
+			if new_ip and new_ip != dev_ip:
+				system.tag.writeBlocking([DEV_IP_TAG], [new_ip])
+			state = "AFTER_CFG"
+
+	elif state == "AFTER_CFG":
+		if req_xml:
+			state = "GET_XML"
+		else:
+			state = "DONE"
+
+	elif state == "GET_XML":
+		msg = FILESYSTEMS.SAP_FTP.Stand.xml_to_PLC.upload_factory_config_from_tags()
+		up = (msg or "").strip().upper()
+		if up.startswith("ERROR"):
+			state = "ERROR"
+		elif up.startswith("DONE"):
+			system.tag.writeBlocking([UA_RESET_TAG], [True])
+			system.tag.writeBlocking([CLEAR_CNT], [2])  # ~2 ticks before Apply
+			state = "WAIT_AFTER_RESET"
+
+	elif state == "WAIT_AFTER_RESET":
+		if clearCnt <= 0:
+			system.tag.writeBlocking([UA_APPLY_TAG], [True])
+			system.tag.writeBlocking([CLEAR_CNT], [2])  # ~2 ticks before VERIFY
+			state = "WAIT_AFTER_APPLY"
+
+	elif state == "WAIT_AFTER_APPLY":
+		if clearCnt <= 0:
+			state = "VERIFY_SN"
+
+	elif state == "VERIFY_SN":
+
+		def norm_sn(s):
+			s = str(s or "").strip()
+			s = "".join(ch for ch in s if ch.isalnum() or ch == "-")
+			return s[:11]
+
+		qv = system.tag.readBlocking([UA_SN_TAG, SN_A_TAG, SN_B_TAG])
+		ua_qv      = qv[0]
+		plc_sn_raw = ua_qv.value
+		good       = ua_qv.quality.isGood()
+		sn_a_raw   = qv[1].value
+		sn_b_raw   = qv[2].value
+
+		plc_sn   = norm_sn(plc_sn_raw)
+		expected = norm_sn(sn_b_raw if active == 1 else sn_a_raw)
+
+		if not good:
+			system.tag.writeBlocking([LOG_MSG], ["ERROR: PLC serial quality is bad on {}".format(UA_SN_TAG)])
+			state = "ERROR"
+		elif not plc_sn:
+			system.tag.writeBlocking([LOG_MSG], ["ERROR: PLC serial empty/invalid on {}".format(UA_SN_TAG)])
+			state = "ERROR"
+		elif not expected:
+			system.tag.writeBlocking([LOG_MSG], ["ERROR: Expected serial empty/invalid ({})".format(comp)])
+			state = "ERROR"
+		elif plc_sn == expected:
+			system.tag.writeBlocking([LOG_MSG], ["DONE: Serial verified ({})".format(plc_sn)])
+			state = "DONE"
+		else:
+			system.tag.writeBlocking([LOG_MSG], [
+				"ERROR: Serial mismatch. PLC(raw='{}'→'{}') expected(raw='{}'→'{}')".format(
+					plc_sn_raw, plc_sn, (sn_b_raw if comp == "B" else sn_a_raw), expected
+				)
+			])
+			state = "ERROR"
+
+	elif state == "DONE":
+		# power down update control; clear only RUN; start log-clear countdown
+		system.tag.writeBlocking([PWR, REQ_RUN, CLEAR_CNT], [False, False, 30])
+		state = "IDLE"
+
+	elif state == "ERROR":
+		# ensure power-up control is off; clear only RUN
+		system.tag.writeBlocking([PWR, REQ_RUN], [False, False])
+		state = "IDLE"
+
+	else:
+		state = "IDLE"
+
+	# ---------- write state once at the end ----------
+	system.tag.writeBlocking([STATE_TAG], [state])
