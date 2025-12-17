@@ -29,7 +29,9 @@ def transform(self, value, quality, timestamp):
 	if ds.getRowCount() == 0:
 		return "0"
 
-	val = ds.getValueAt(0, "value")
+	# For queryAggregatedPoints, the first column is the timestamp;
+	# the aggregated value is in the second column (index 1).
+	val = ds.getValueAt(0, 1)
 	if val is None:
 		return "0"
 
