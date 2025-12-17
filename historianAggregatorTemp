@@ -1,46 +1,45 @@
-
+def transform(self, value, quality, timestamp):
 	logger = system.util.getLogger("HistLabel")
-	
-	tagPath		= value
-	isToday		= bool(self.view.params.todayPday)
-	isCount		= bool(self.view.params.cntDur)
-	
-	now			= system.date.now()
-	todayStart	= system.date.midnight(now)
-	yestStart	= system.date.addDays(todayStart, -1)
-	
-	startDate	= todayStart if isToday else yestStart
-	endDate		= now if isToday else todayStart
-	
-	agg			= "CountOn" if isCount else "DurationOn"
-	
+
+	tagPath     = value
+	isToday     = bool(self.view.params.todayPday)
+	isCount     = bool(self.view.params.cntDur)
+
+	now         = system.date.now()
+	todayStart  = system.date.midnight(now)
+	yestStart   = system.date.addDays(todayStart, -1)
+
+	startDate   = todayStart if isToday else yestStart
+	endDate     = now if isToday else todayStart
+
+	agg         = "CountOn" if isCount else "DurationOn"
+
 	try:
-		ds = system.tag.queryTagHistory(
+		ds = system.historian.queryAggregatedPoints(
 			paths=[tagPath],
-			startDate=startDate,
-			endDate=endDate,
-			returnSize=1,
-			aggregationMode=agg,
-			returnFormat="Tall"
+			startTime=startDate,
+			endTime=endDate,
+			aggregates=[agg],
+			returnSize=1
 		)
 	except Exception as e:
-		logger.warn("queryTagHistory failed for %s (%s): %s" % (tagPath, agg, e))
+		logger.warn("queryAggregatedPoints failed for %s (%s): %s" % (tagPath, agg, e))
 		return "0"
-	
+
 	if ds.getRowCount() == 0:
 		return "0"
-	
+
 	val = ds.getValueAt(0, "value")
 	if val is None:
 		return "0"
-	
+
 	# CountOn returns a number of transitions FALSE->TRUE
 	if isCount:
 		try:
 			return str(int(val))
 		except:
 			return "0"
-	
+
 	# DurationOn returns seconds; convert to hours for display
 	try:
 		hours = float(val) / 3600.0
