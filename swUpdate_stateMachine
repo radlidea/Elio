@@ -68,10 +68,11 @@ if gatewayName != "sap-ignition":
 	PWR = POWER_B if active == 1 else POWER_A
 
 	# ---- UA tag paths now depend on A/B ----
-	ua_base      = "ParameterLoader/Compressor_{}/UA_Tags/TM251".format(comp)
-	UA_RESET_TAG = ua_base + "/ParameterGroup_C_C_01_0001_Reset"
-	UA_APPLY_TAG = ua_base + "/ParameterGroup_C_C_01_0004_Apply"
-	UA_SN_TAG    = ua_base + "/ParameterGroup_P_P_00_0000_Compressor_SerialNumber"
+	ua_base          = "ParameterLoader/Compressor_{}/UA_Tags/TM251".format(comp)
+	UA_RESET_TAG     = ua_base + "/ParameterGroup_C_C_01_0001_Reset"
+	UA_APPLY_TAG     = ua_base + "/ParameterGroup_C_C_01_0004_Apply"
+	UA_SN_TAG        = ua_base + "/ParameterGroup_P_P_00_0000_Compressor_SerialNumber"
+	UA_NTP_ENABLE_TAG = ua_base + "/ParameterGroup_P_P_02_0006_NtpClientEnable"
 	# ----------------------------------------
 
 	# --- clear log / XML countdown ---
@@ -196,6 +197,8 @@ if gatewayName != "sap-ignition":
 			system.tag.writeBlocking([LOG_MSG], ["ERROR: Expected serial empty/invalid ({})".format(comp)])
 			state = "ERROR"
 		elif plc_sn == expected:
+			# XML applied successfully and serial verified → enable NTP client on the active compressor
+			system.tag.writeBlocking([UA_NTP_ENABLE_TAG], [True])
 			system.tag.writeBlocking([LOG_MSG], ["DONE: Serial verified ({})".format(plc_sn)])
 			state = "DONE"
 		else:
